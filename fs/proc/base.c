@@ -88,6 +88,7 @@
 #include <linux/flex_array.h>
 #include <linux/posix-timers.h>
 #include <linux/task_integrity.h>
+#include <linux/proca.h>
 #ifdef CONFIG_HARDWALL
 #include <asm/hardwall.h>
 #endif
@@ -2534,22 +2535,22 @@ static int proc_integrity_label_read(struct seq_file *m,
 {
 	struct integrity_label *l;
 
-	spin_lock(&task->integrity->lock);
+	spin_lock(&task->integrity->value_lock);
 	l = task->integrity->label;
-	spin_unlock(&task->integrity->lock);
+	spin_unlock(&task->integrity->value_lock);
 
 	if (l) {
 		size_t remaining_len;
 		char *buffer = NULL;
-		size_t hex_len = l->len * 2;
+		size_t data_len = l->len * 2;
 
-		seq_printf(m, "%zu\n", hex_len);
+		seq_printf(m, "%zu\n", data_len);
 		remaining_len = seq_get_buf(m, &buffer);
 
-		if (l->len && remaining_len) {
-			size_t size = min(hex_len, remaining_len);
+		if (data_len && remaining_len > 1) {
+			size_t size = min(data_len, remaining_len);
 
-			bin2hex(buffer, l->data, size);
+			bin2hex(buffer, l->data, size / 2);
 			seq_commit(m, size);
 		}
 	} else {
@@ -2559,9 +2560,85 @@ static int proc_integrity_label_read(struct seq_file *m,
 	return 0;
 }
 
+static int proc_integrity_reset_cause(struct seq_file *m,
+				struct pid_namespace *ns,
+				struct pid *pid, struct task_struct *task)
+{
+	if (task->integrity->reset_cause)
+		seq_printf(m, "%s\n", tint_reset_cause_to_string(
+			task->integrity->reset_cause));
+	else
+		seq_printf(m, "%s", "");
+	return 0;
+}
+
+static int proc_integrity_reset_file(struct seq_file *m,
+				struct pid_namespace *ns,
+				struct pid *pid, struct task_struct *task)
+{
+	char *tmp = NULL;
+	char *pathname;
+
+	if (!task->integrity->reset_file) {
+		seq_printf(m, "%s", "");
+		return 0;
+	}
+
+	tmp = (char *)__get_free_page(GFP_KERNEL);
+	if (!tmp)
+		return -ENOMEM;
+
+	pathname = d_path(&task->integrity->reset_file->f_path, tmp, PAGE_SIZE);
+	if (IS_ERR(pathname))
+		goto out;
+
+	seq_printf(m, "%s\n", pathname);
+
+ out:
+	free_page((unsigned long)tmp);
+
+	return 0;
+}
+
+#ifdef CONFIG_PROCA_DEBUG
+static int proc_get_proca_cert(struct seq_file *m,
+		struct pid_namespace *ns, struct pid *pid,
+		struct task_struct *task)
+{
+	const char *cert;
+	size_t cert_size;
+
+	if (!proca_get_task_cert(task, &cert, &cert_size)) {
+		size_t remaining_len;
+		char *buffer = NULL;
+		size_t data_len = cert_size * 2;
+
+		seq_printf(m, "%zu\n", data_len);
+		remaining_len = seq_get_buf(m, &buffer);
+
+		if (data_len && remaining_len > 1) {
+			size_t size = min(data_len, remaining_len);
+
+			bin2hex(buffer, cert, size / 2);
+			seq_commit(m, size);
+			seq_putc(m, '\n');
+		}
+	} else {
+		seq_printf(m, "%d\n", -1);
+	}
+
+	return 0;
+}
+#endif
+
 static const struct pid_entry integrity_dir_stuff[] = {
 	ONE("value", S_IRUGO, proc_integrity_value_read),
 	ONE("label", S_IRUGO, proc_integrity_label_read),
+	ONE("reset_cause", S_IRUGO, proc_integrity_reset_cause),
+	ONE("reset_file", S_IRUGO, proc_integrity_reset_file),
+#ifdef CONFIG_PROCA_DEBUG
+	ONE("proca_certificate", S_IRUGO, proc_get_proca_cert),
+#endif
 };
 
 static int

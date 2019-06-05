@@ -1,4 +1,3 @@
-/* Copyright (c) 2015 Samsung Electronics Co., Ltd. */
 /*
  * INET		An implementation of the TCP/IP protocol suite for the LINUX
  *		operating system.  INET is implemented using the  BSD Socket
@@ -77,6 +76,7 @@
 #include <linux/atomic.h>
 #include <net/dst.h>
 #include <net/checksum.h>
+#include <net/tcp_states.h>
 #include <linux/net_tstamp.h>
 #include <net/tcp_states.h>
 
@@ -96,6 +96,12 @@ void mem_cgroup_sockets_destroy(struct mem_cgroup *memcg)
 {
 }
 #endif
+
+/* START_OF_KNOX_NPA */
+#define NAP_PROCESS_NAME_LEN	128
+#define NAP_DOMAIN_NAME_LEN	255
+/* END_OF_KNOX_NPA */
+
 /*
  * This structure really needs to be cleaned up.
  * Most of it is for TCP, and not used by any of
@@ -436,15 +442,18 @@ struct sock {
 	kuid_t			sk_uid;
 	u32			sk_classid;
 	struct cg_proto		*sk_cgrp;
-    /* START_OF_KNOX_VPN */
+	/* START_OF_KNOX_NPA */
 	uid_t			knox_uid;
 	pid_t			knox_pid;
-    __be32          sk_udp_daddr;
-    __be32          sk_udp_saddr;
-    __be16          sk_udp_dport;
-    __be16          sk_udp_sport;
-    char domain_name[255];
-    /* END_OF_KNOX_VPN */
+	uid_t			knox_dns_uid;
+	char 			domain_name[NAP_DOMAIN_NAME_LEN];
+	char			process_name[NAP_PROCESS_NAME_LEN];
+	uid_t			knox_puid;
+	pid_t			knox_ppid;
+	char			parent_process_name[NAP_PROCESS_NAME_LEN];
+	pid_t			knox_dns_pid;
+	char 			dns_process_name[NAP_PROCESS_NAME_LEN];
+	/* END_OF_KNOX_NPA */
 	void			(*sk_state_change)(struct sock *sk);
 	void			(*sk_data_ready)(struct sock *sk);
 	void			(*sk_write_space)(struct sock *sk);
@@ -736,6 +745,8 @@ enum sock_flags {
 	SOCK_SELECT_ERR_QUEUE, /* Wake select on error queue */
 };
 
+#define SK_FLAGS_TIMESTAMP ((1UL << SOCK_TIMESTAMP) | (1UL << SOCK_TIMESTAMPING_RX_SOFTWARE))
+
 static inline void sock_copy_flags(struct sock *nsk, struct sock *osk)
 {
 	nsk->sk_flags = osk->sk_flags;
@@ -810,7 +821,7 @@ void sk_stream_write_space(struct sock *sk);
 static inline void __sk_add_backlog(struct sock *sk, struct sk_buff *skb)
 {
 	/* dont let skb dst not refcounted, we are going to leave rcu lock */
-	skb_dst_force(skb);
+	skb_dst_force_safe(skb);
 
 	if (!sk->sk_backlog.tail)
 		sk->sk_backlog.head = skb;
@@ -839,6 +850,14 @@ static inline __must_check int sk_add_backlog(struct sock *sk, struct sk_buff *s
 {
 	if (sk_rcvqueues_full(sk, limit))
 		return -ENOBUFS;
+
+	/*
+	 * If the skb was allocated from pfmemalloc reserves, only
+	 * allow SOCK_MEMALLOC sockets to use it as this socket is
+	 * helping free memory
+	 */
+	if (skb_pfmemalloc(skb) && !sock_flag(sk, SOCK_MEMALLOC))
+		return -ENOMEM;
 
 	__sk_add_backlog(sk, skb);
 	sk->sk_backlog.len += skb->truesize;
